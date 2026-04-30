@@ -1,0 +1,18 @@
+dataset_dir: "/home/hfl/2026/A-Pioneering/datasets/ours_default_data"
+train_data:
+  random_rotation: true
+model:
+  boundary_stats_channels: 6
+  boundary_projector: true
+  boundary_projector_scale: 0.5
+training:
+  scale_loss_weight: 0.0
+  teacher_full_steps: 0
+  teacher_decay_steps: 1
+  rollout_loss_steps: 2
+  max_preprocess_steps: 0
+  preprocess_progress_steps: 1
+  preprocess_difficulty_scale: 0.0
+  input_pos_noise_std: 0.0
+  input_vel_noise_std: 0.0
+  use_region_loss: false
