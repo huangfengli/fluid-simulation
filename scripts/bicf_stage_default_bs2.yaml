@@ -1,10 +1,12 @@
-dataset_dir: "/home/hfl/2026/A-Pioneering/datasets/ours_6k_box_data"
+dataset_dir: "/home/hfl/2026/A-Pioneering/datasets/ours_default_data"
 train_data:
   random_rotation: true
 model:
   boundary_stats_channels: 6
   boundary_projector: true
   boundary_projector_scale: 0.5
+  stage_channels: [64, 128, 64]
+  skip_stage_fusion: true
 training:
   scale_loss_weight: 0.0
   teacher_full_steps: 0

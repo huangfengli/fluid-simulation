@@ -28,7 +28,7 @@ min_err = float('inf')
 
 
 def create_model(**kwargs):
-    from models.default_torch import MyParticleNetwork
+    from models.bgsp_torch import MyParticleNetwork
     """Returns an instance of the network for training and evaluation"""
     model = MyParticleNetwork(**kwargs)
     return model
@@ -48,6 +48,11 @@ def main():
     with open(args.cfg, 'r') as f:
         cfg = yaml.safe_load(f)
     training_cfg = cfg.get('training', {})
+    max_iter = int(training_cfg.get('max_iter', train_params.max_iter))
+    base_lr = float(training_cfg.get('base_lr', train_params.base_lr))
+    batch_size = int(training_cfg.get('batch_size', train_params.batch_size))
+    eval_interval = int(training_cfg.get('eval_interval', _k))
+    resume_training = bool(training_cfg.get('resume', True))
     scale_loss_weight = float(training_cfg.get('scale_loss_weight', 0.05))
     teacher_full_steps = int(training_cfg.get('teacher_full_steps', 3000))
     teacher_decay_steps = int(training_cfg.get('teacher_decay_steps', 5000))
@@ -78,7 +83,7 @@ def main():
     val_dataset = read_data_val(files=val_files, window=1, cache_data=True)
 
     dataset = read_data_train(files=train_files,
-                              batch_size=train_params.batch_size,
+                              batch_size=batch_size,
                               window=train_window,
                               num_workers=2,
                               **cfg.get('train_data', {}))
@@ -128,7 +133,7 @@ def main():
         return factor
 
     optimizer = torch.optim.Adam(model.parameters(),
-                                 lr=train_params.base_lr,
+                                 lr=base_lr,
                                  weight_decay=0.001,
                                  eps=1e-6)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lrfactor_fn)
@@ -144,7 +149,7 @@ def main():
     manager = MyCheckpointManager(checkpoint_fn,
                                   trainer.checkpoint_dir,
                                   keep_checkpoint_steps=list(
-                                      range(1 * _k, train_params.max_iter + 1,
+                                      range(1 * _k, max_iter + 1,
                                             1 * _k)),
                                   save_interval_minutes=None)
 
@@ -242,6 +247,16 @@ def main():
             pred_hist = pred_hist / pred_hist.sum().clamp(min=1.0)
         return scale_loss, acc, label_hist, pred_hist
 
+    def contrast_gain_value(model):
+        gains = [
+            torch.tanh(param.detach()).abs().mean()
+            for name, param in model.named_parameters()
+            if 'contrast_gain' in name
+        ]
+        if not gains:
+            return 0.0
+        return float(torch.stack(gains).mean())
+
     def train(model, batch):
         optimizer.zero_grad()
         pos_losses = []
@@ -253,7 +268,6 @@ def main():
         sample_difficulties = []
         alpha = teacher_forcing_alpha(trainer.current_step)
 
-        batch_size = train_params.batch_size
         for batch_i in range(batch_size):
             box = batch['box'][batch_i]
             box_normals = batch['box_normals'][batch_i]
@@ -341,7 +355,7 @@ def main():
                 torch.stack(preprocess_steps_used).mean().detach(),
                 torch.stack(sample_difficulties).mean().detach())
 
-    if manager.latest_checkpoint:
+    if resume_training and manager.latest_checkpoint:
         print('restoring from ', manager.latest_checkpoint)
         latest_checkpoint = torch.load(manager.latest_checkpoint)
         step = latest_checkpoint['step']
@@ -360,7 +374,7 @@ def main():
 
     display_str_list = []
     while trainer.keep_training(step,
-                                train_params.max_iter, #最大迭代次数50000
+                                max_iter, #最大迭代次数50000
                                 checkpoint_manager=manager,
                                 display_str_list=display_str_list):
         # 每次循环一个batch
@@ -385,12 +399,11 @@ def main():
          current_difficulty) = train(model, batch_torch)
         #batch_torch(n, bs, p,3) n是n种属性（作键），bs是batch_size，p是该组场景数据中的点数（各场景点数不相同），3是特征维度为三维（xyz）
         scheduler.step()
+        current_contrast_gain = contrast_gain_value(model)
         display_str_list = [
-            'loss', float(current_loss), 'pos_loss',
-            float(current_pos_loss), 'scale_loss',
-            float(current_scale_loss), 'scale_acc',
-            float(scale_acc), 'scale_alpha', float(current_alpha),
-            'pre_w', float(current_preprocess_steps)
+            'loss', float(current_loss),
+            'pos_loss', float(current_pos_loss),
+            'contrast_gain', current_contrast_gain
         ] #记录每一次迭代的loss
 
         if trainer.current_step % 10 == 0:
@@ -426,6 +439,9 @@ def main():
             trainer.summary_writer.add_scalar('LearningRate',
                                               scheduler.get_last_lr()[0],
                                               trainer.current_step)
+            trainer.summary_writer.add_scalar('fusion/contrast_gain',
+                                              current_contrast_gain,
+                                              trainer.current_step)
             if model.last_gate_weights:
                 gate_mean = torch.stack([
                     gate.mean() for gate in model.last_gate_weights
@@ -435,7 +451,7 @@ def main():
                                                   trainer.current_step)
         # 每10个iteration打印一次loss
 
-        if (trainer.current_step) % (1.0 * _k) == 0:
+        if eval_interval > 0 and (trainer.current_step) % eval_interval == 0:
             eval_metrics = evaluate_torch(model,
                                           val_dataset,
                                           frame_skip=20,
@@ -447,13 +463,18 @@ def main():
                                                   trainer.current_step)
                 if(k == "err_n1" and v < min_err):
                     min_err = v
-                    torch.save({'model': model.state_dict()}, str(step.item())+'_model_weights_best.pt')
+                    best_model_path = os.path.join(
+                        train_dir,
+                        str(step.item()) + '_model_weights_best.pt')
+                    torch.save({'model': model.state_dict()},
+                               best_model_path)
                     print("=================update best model: err_n1=" + str(v) + "===============")
 
     # 第1000次迭代eval一次
 
-    torch.save({'model': model.state_dict()}, 'model_weights.pt') #所有batch遍历一遍记录下当前model
-    if trainer.current_step == train_params.max_iter:
+    torch.save({'model': model.state_dict()},
+               os.path.join(train_dir, 'model_weights.pt')) #所有batch遍历一遍记录下当前model
+    if trainer.current_step == max_iter:
         return trainer.STATUS_TRAINING_FINISHED
     else:
         return trainer.STATUS_TRAINING_UNFINISHED

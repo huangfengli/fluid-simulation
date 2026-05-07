@@ -1,4 +1,4 @@
-dataset_dir: "/home/hfl/2026/A-Pioneering/datasets/ours_6k_box_data"
+dataset_dir: "/home/hfl/2026/A-Pioneering/datasets/ours_default_data"
 train_data:
   random_rotation: true
 model:
